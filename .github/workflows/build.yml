@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
     inputs:
       force_build:
-        description: "Force build even if no changes detected"
+        description: "Force build"
         required: false
         type: boolean
         default: false
@@ -39,8 +39,8 @@ jobs:
         id: base-info
         run: |
           podman pull "$BASE_IMAGE" 2>/dev/null || docker pull "$BASE_IMAGE"
-          KERNEL=$(podman run --rm "$BASE_IMAGE" bash -c 'rpm -q --queryformat "%{VERSION}-%{RELEASE}" kernel 2>/dev/null || rpm -q --queryformat "%{VERSION}-%{RELEASE}" kernel-bazzite 2>/dev/null || uname -r' 2>/dev/null || \
-                   docker run --rm "$BASE_IMAGE" bash -c 'rpm -q --queryformat "%{VERSION}-%{RELEASE}" kernel 2>/dev/null || rpm -q --queryformat "%{VERSION}-%{RELEASE}" kernel-bazzite 2>/dev/null || uname -r')
+          KERNEL=$(podman run --rm "$BASE_IMAGE" bash -c 'rpm -q --queryformat "%{VERSION}-%{RELEASE}" kernel 2>/dev/null || uname -r' 2>/dev/null || \
+                   docker run --rm "$BASE_IMAGE" bash -c 'rpm -q --queryformat "%{VERSION}-%{RELEASE}" kernel 2>/dev/null || uname -r')
           MESA=$(podman run --rm "$BASE_IMAGE" rpm -q mesa-vulkan-drivers --queryformat '%{VERSION}-%{RELEASE}' 2>/dev/null || \
                  docker run --rm "$BASE_IMAGE" rpm -q mesa-vulkan-drivers --queryformat '%{VERSION}-%{RELEASE}')
           echo "kernel_version=$KERNEL" >> "$GITHUB_OUTPUT"
@@ -53,8 +53,8 @@ jobs:
           PINNED=$(grep -v '^#' upstream-commit.txt | grep -v '^$' | awk '{print $1}')
           LATEST=$(git ls-remote "$UPSTREAM_REPO" main | awk '{print $1}')
           echo "Pinned: ${PINNED:0:8} | Latest: ${LATEST:0:8}"
-          if [[ "$PINNED" != "$LATEST" ]]; then
-            echo "⚠️  Upstream has newer commits"
+          if [ "$PINNED" != "$LATEST" ]; then
+            echo "Upstream has newer commits"
           fi
 
       - name: Detect changes
@@ -73,9 +73,10 @@ jobs:
           PREV_PINNED=$(cat .base-digests/previous-upstream.txt 2>/dev/null || echo "")
 
           kernel_changed="false"; mesa_changed="false"; should_build="false"
-          [[ "$PREV_KERNEL" != "$CURR_KERNEL" || "$PREV_MESA" != "$CURR_MESA" ]] && kernel_changed="true" && mesa_changed="true" && should_build="true"
-          [[ "$PINNED" != "$PREV_PINNED" ]] && should_build="true" && kernel_changed="true" && mesa_changed="true"
-          [[ "${{ github.event.inputs.force_build }}" == "true" ]] && should_build="true" && kernel_changed="true" && mesa_changed="true"
+          [ "$PREV_KERNEL" != "$CURR_KERNEL" ] && kernel_changed="true" && mesa_changed="true" && should_build="true"
+          [ "$PREV_MESA" != "$CURR_MESA" ] && kernel_changed="true" && mesa_changed="true" && should_build="true"
+          [ "$PINNED" != "$PREV_PINNED" ] && should_build="true" && kernel_changed="true" && mesa_changed="true"
+          [ "${{ github.event.inputs.force_build }}" = "true" ] && should_build="true" && kernel_changed="true" && mesa_changed="true"
 
           echo "kernel_changed=$kernel_changed" >> "$GITHUB_OUTPUT"
           echo "mesa_changed=$mesa_changed" >> "$GITHUB_OUTPUT"
@@ -91,6 +92,7 @@ jobs:
 
       - name: Read upstream commit
         id: upstream
+        shell: bash
         run: |
           PINNED=$(grep -v '^#' upstream-commit.txt | grep -v '^$' | awk '{print $1}')
           echo "commit=$PINNED" >> "$GITHUB_OUTPUT"
@@ -114,7 +116,6 @@ jobs:
           key: bazzite-base-${{ needs.detect-changes.outputs.base_kernel }}
 
       - name: Build amdgpu.ko
-        
         shell: bash
         run: |
           set -euo pipefail
@@ -122,10 +123,13 @@ jobs:
           UPSTREAM_COMMIT="${{ steps.upstream.outputs.commit }}"
           echo "Kernel: $KERNEL_VER | Upstream: $UPSTREAM_COMMIT"
 
+          # Create all dirs before podman mounts
           mkdir -p output /tmp/upstream-fix-cache /tmp/bazzite-image-cache /tmp/kernel-src-cache
 
-          # Load/save Bazzite image cache
-          test -f /tmp/bazzite-image-cache/bazzite.tar ]] && podman load -i /tmp/bazzite-image-cache/bazzite.tar 2>/dev/null || true
+          # Cache Bazzite image
+          if [ -f /tmp/bazzite-image-cache/bazzite.tar ]; then
+            podman load -i /tmp/bazzite-image-cache/bazzite.tar 2>/dev/null || true
+          fi
           podman pull "$BASE_IMAGE" 2>/dev/null || true
           podman save "$BASE_IMAGE" -o /tmp/bazzite-image-cache/bazzite.tar 2>/dev/null || true
 
@@ -139,28 +143,27 @@ jobs:
             -e UPSTREAM_REPO="$UPSTREAM_REPO" \
             "$BASE_IMAGE" bash -c '
               set -euo pipefail
+
               echo "=== Installing build deps ==="
-              # Bazzite uses the ogc kernel (based on Fedora kernel).
-              # kernel-devel for ogc is not in standard repos, but we can use
-              # the matching Fedora kernel-devel since amdgpu is identical.
               KERNEL_MAJOR=$(echo "$KERNEL_VER" | cut -d. -f1-3)
-              dnf install -y "kernel-devel-${KERNEL_MAJOR}" gcc make flex bison elfutils-libelf-devel openssl-devel bc perl 2>/dev/null || \
-                dnf install -y kernel-devel gcc make flex bison elfutils-libelf-devel openssl-devel bc perl 2>/dev/null || \
-                rpm-ostree install -y kernel-devel gcc make flex bison elfutils-libelf-devel openssl-devel bc perl
-              
-              # Find the installed kernel-devel version
+              dnf install -y "kernel-devel-${KERNEL_MAJOR}" gcc make flex bison \
+                elfutils-libelf-devel openssl-devel bc perl 2>/dev/null || \
+              dnf install -y kernel-devel gcc make flex bison \
+                elfutils-libelf-devel openssl-devel bc perl 2>/dev/null || \
+              rpm-ostree install -y kernel-devel gcc make flex bison \
+                elfutils-libelf-devel openssl-devel bc perl
+
               INSTALLED_KVER=$(rpm -q kernel-devel --queryformat "%{VERSION}-%{RELEASE}" 2>/dev/null | head -1)
               echo "Installed kernel-devel: $INSTALLED_KVER"
               KDEVEL_DIR="/lib/modules/${INSTALLED_KVER}/build"
-              if test ! -d "$KDEVEL_DIR" ]]; then
-                # Try matching by major version
+              if [ ! -d "$KDEVEL_DIR" ]; then
                 KDEVEL_DIR=$(ls -d /lib/modules/7*/build 2>/dev/null | head -1)
                 INSTALLED_KVER=$(basename "$(dirname "$KDEVEL_DIR")")
               fi
-              echo "Using kernel build dir: $KDEVEL_DIR"
+              echo "Kernel build dir: $KDEVEL_DIR"
 
               echo "=== Upstream patches ==="
-              if test ! -d /upstream-fix/patches ]]; then
+              if [ ! -d /upstream-fix/patches ]; then
                 git clone "$UPSTREAM_REPO" /upstream-fix
                 cd /upstream-fix
                 git fetch --depth=1 origin "$UPSTREAM_COMMIT"
@@ -172,25 +175,24 @@ jobs:
               echo "Upstream: $(git rev-parse HEAD)"
 
               echo "=== Kernel source ==="
-              if test ! -d /kernel-src-cache/drivers ]]; then
-                # Download kernel source matching the installed kernel-devel
-                KERNEL_SRC_VER=$(echo "$INSTALLED_KVER" | sed 's/-.*///' )
+              if [ ! -d /kernel-src-cache/drivers ]; then
+                KERNEL_SRC_VER=$(echo "$INSTALLED_KVER" | sed "s/-.*//")
                 echo "Downloading kernel source $KERNEL_SRC_VER..."
                 cd /tmp
-                curl -fsSL -o kernel.tar.xz "https://cdn.kernel.org/pub/linux/kernel/v$(echo "$KERNEL_SRC_VER" | cut -d. -f1).x/linux-${KERNEL_SRC_VER}.tar.xz" 2>/dev/null || \
-                  curl -fsSL -o kernel.tar.xz "https://kojipkgs.fedoraproject.org/packages/kernel/${KERNEL_SRC_VER}/$(echo "$INSTALLED_KVER" | sed 's/.*-//')/src/kernel-${KERNEL_SRC_VER}.src.rpm" 2>/dev/null || true
-                if test -f kernel.tar.xz ]]; then
+                curl -fsSL -o kernel.tar.xz \
+                  "https://cdn.kernel.org/pub/linux/kernel/v$(echo "$KERNEL_SRC_VER" | cut -d. -f1).x/linux-${KERNEL_SRC_VER}.tar.xz" 2>/dev/null
+                if [ -f kernel.tar.xz ]; then
                   tar xf kernel.tar.xz
-                  mv linux-${KERNEL_SRC_VER} /kernel-src-cache 2>/dev/null || mv linux-* /kernel-src-cache 2>/dev/null || true
-                fi
-                # Fallback: try git clone of mainline
-                if test ! -d /kernel-src-cache/drivers ]]; then
-                  git clone --depth=1 --branch v${KERNEL_SRC_VER} https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git /kernel-src-cache 2>/dev/null || \
-                    git clone --depth=1 --branch linux-${KERNEL_SRC_VER} https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git /kernel-src-cache 2>/dev/null || true
+                  mv linux-"${KERNEL_SRC_VER}" /kernel-src-cache
+                else
+                  echo "Trying kernel.org git..."
+                  git clone --depth=1 --branch "v${KERNEL_SRC_VER}" \
+                    https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git \
+                    /kernel-src-cache 2>/dev/null || true
                 fi
               fi
               cd /kernel-src-cache
-              echo "Kernel source: $(head -1 Makefile 2>/dev/null || echo 'not found')"
+              echo "Kernel source: $(head -1 Makefile 2>/dev/null || echo not-found)"
 
               echo "=== Applying patches ==="
               for p in /upstream-fix/patches/kernel/v33/*.patch; do
@@ -200,16 +202,15 @@ jobs:
 
               echo "=== Building amdgpu.ko ==="
               AMDGPU_DIR="$PWD/drivers/gpu/drm/amd/amdgpu"
-              if test ! -d "$AMDGPU_DIR" ]]; then
-                echo "ERROR: amdgpu source not found at $AMDGPU_DIR"
-                echo "Kernel source tree:"
-                ls -la
+              if [ ! -d "$AMDGPU_DIR" ]; then
+                echo "ERROR: amdgpu source not found"
+                ls -la drivers/gpu/drm/amd/ 2>/dev/null || echo "No amd dir"
                 exit 1
               fi
               make -C "$KDEVEL_DIR" M="$AMDGPU_DIR" -j"$(nproc)" modules
               mkdir -p /output
               cp "$AMDGPU_DIR/amdgpu.ko" /output/
-              echo "✅ amdgpu.ko built"
+              echo "amdgpu.ko built successfully"
               ls -lh /output/amdgpu.ko
             '
 
@@ -229,6 +230,7 @@ jobs:
 
       - name: Read upstream commit
         id: upstream
+        shell: bash
         run: |
           PINNED=$(grep -v '^#' upstream-commit.txt | grep -v '^$' | awk '{print $1}')
           echo "commit=$PINNED" >> "$GITHUB_OUTPUT"
@@ -263,13 +265,15 @@ jobs:
 
           mkdir -p output /tmp/upstream-fix-cache /tmp/mesa-tarball /tmp/fedora-image-cache
 
-          # Cache Fedora image
-          test -f /tmp/fedora-image-cache/fedora.tar ]] && podman load -i /tmp/fedora-image-cache/fedora.tar 2>/dev/null || true
+          if [ -f /tmp/fedora-image-cache/fedora.tar ]; then
+            podman load -i /tmp/fedora-image-cache/fedora.tar 2>/dev/null || true
+          fi
           podman pull registry.fedoraproject.org/fedora:43 2>/dev/null || true
           podman save registry.fedoraproject.org/fedora:43 -o /tmp/fedora-image-cache/fedora.tar 2>/dev/null || true
 
-          # Cache Mesa tarball
-          test -f /tmp/mesa-tarball/mesa.tar.gz ]] || curl -fsSL -o /tmp/mesa-tarball/mesa.tar.gz "$MESA_URL"
+          if [ ! -f /tmp/mesa-tarball/mesa.tar.gz ]; then
+            curl -fsSL -o /tmp/mesa-tarball/mesa.tar.gz "$MESA_URL"
+          fi
 
           podman run --rm \
             -v "${{ github.workspace }}:/workspace:ro" \
@@ -281,6 +285,7 @@ jobs:
             -e UPSTREAM_REPO="$UPSTREAM_REPO" \
             registry.fedoraproject.org/fedora:43 bash -c '
               set -euo pipefail
+
               echo "=== Installing build deps ==="
               dnf install -y gcc gcc-c++ meson ninja-build python3 python3-mako \
                 vulkan-headers vulkan-loader-devel libdrm-devel elfutils-libelf-devel \
@@ -288,7 +293,7 @@ jobs:
                 git patch tar xz which make
 
               echo "=== Upstream patches ==="
-              if test ! -d /upstream-fix/patches ]]; then
+              if [ ! -d /upstream-fix/patches ]; then
                 git clone "$UPSTREAM_REPO" /upstream-fix
                 cd /upstream-fix
                 git fetch --depth=1 origin "$UPSTREAM_COMMIT"
@@ -304,28 +309,29 @@ jobs:
               cd mesa-mesa-*
 
               echo "=== Applying patches ==="
-              # Use our local rebased Mesa patch (upstream 3-hunk patch
-              # doesn't apply to Mesa 26.2.1+ — hunk 2 is already upstream)
-              if test -f /workspace/patches/mesa/0001-gfx1013-compute-queue-fix.patch ]]; then
+              if [ -f /workspace/patches/mesa/0001-gfx1013-compute-queue-fix.patch ]; then
                 echo "Using local rebased Mesa patch"
                 patch -p0 < /workspace/patches/mesa/0001-gfx1013-compute-queue-fix.patch
               else
-                # Fallback: use upstream series
                 while IFS= read -r line; do
-                  [[ "$line" =~ ^[[:space:]]*# ]] && continue
-                  [[ -z "${line// /}" ]] && continue
-                  echo "  $(basename "/upstream-fix/patches/mesa/$line")"
-                  patch -p1 < "/upstream-fix/patches/mesa/$(echo "$line" | xargs)"
+                  case "$line" in \#*) continue ;; esac
+                  [ -z "$(echo "$line" | tr -d " ")" ] && continue
+                  echo "  $line"
+                  patch -p1 < "/upstream-fix/patches/mesa/$line"
                 done < /upstream-fix/patches/mesa/series
               fi
 
               echo "=== Building RADV ==="
-              meson setup build -Dvulkan-drivers=amd -Dgallium-drivers= -Dglx=disabled -Dllvm=disabled -Dbuildtype=release -Dprefix=/opt/bc250-gfx1013
+              meson setup build -Dvulkan-drivers=amd -Dgallium-drivers= \
+                -Dglx=disabled -Dllvm=disabled -Dbuildtype=release \
+                -Dprefix=/opt/bc250-gfx1013
               ninja -C build
               DESTDIR=/output ninja -C build install
-              test -f /output/opt/bc250-gfx1013/share/vulkan/icd.d/radeon_icd.x86_64.json ]] && \
+
+              if [ -f /output/opt/bc250-gfx1013/share/vulkan/icd.d/radeon_icd.x86_64.json ]; then
                 cp /output/opt/bc250-gfx1013/share/vulkan/icd.d/radeon_icd.x86_64.json /output/
-              echo "✅ RADV built"
+              fi
+              echo "RADV built successfully"
               du -sh /output/opt/bc250-gfx1013/
             '
 
@@ -349,9 +355,9 @@ jobs:
         continue-on-error: true
       - run: |
           echo "=== Verification ==="
-          test -f output/amdgpu.ko ]] && echo "✅ amdgpu.ko" || echo "⚠️  amdgpu.ko not built"
-          test -d output/opt ]] && echo "✅ RADV tree" || echo "⚠️  RADV not built"
-          test -f output/radeon_icd.x86_64.json ]] && echo "✅ ICD manifest"
+          [ -f output/amdgpu.ko ] && echo "amdgpu.ko OK" || echo "amdgpu.ko not built"
+          [ -d output/opt ] && echo "RADV tree OK" || echo "RADV not built"
+          [ -f output/radeon_icd.x86_64.json ] && echo "ICD manifest OK"
           echo "=== Phase 0 complete ==="
 
   save-digests:
@@ -361,7 +367,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: |
+      - shell: bash
+        run: |
           mkdir -p .base-digests
           echo "${{ needs.detect-changes.outputs.base_kernel }}" > .base-digests/previous-kernel.txt
           echo "${{ needs.detect-changes.outputs.base_mesa }}" > .base-digests/previous-mesa.txt
