@@ -263,12 +263,20 @@ jobs:
               cd mesa-mesa-*
 
               echo "=== Applying patches ==="
-              while IFS= read -r line; do
-                [[ "$line" =~ ^[[:space:]]*# ]] && continue
-                [[ -z "${line// /}" ]] && continue
-                echo "  $(basename "/upstream-fix/patches/mesa/$line")"
-                patch -p1 < "/upstream-fix/patches/mesa/$(echo "$line" | xargs)"
-              done < /upstream-fix/patches/mesa/series
+              # Use our local rebased Mesa patch (upstream 3-hunk patch
+              # doesn't apply to Mesa 26.2.1+ — hunk 2 is already upstream)
+              if [[ -f /workspace/patches/mesa/0001-gfx1013-compute-queue-fix.patch ]]; then
+                echo "Using local rebased Mesa patch"
+                patch -p0 < /workspace/patches/mesa/0001-gfx1013-compute-queue-fix.patch
+              else
+                # Fallback: use upstream series
+                while IFS= read -r line; do
+                  [[ "$line" =~ ^[[:space:]]*# ]] && continue
+                  [[ -z "${line// /}" ]] && continue
+                  echo "  $(basename "/upstream-fix/patches/mesa/$line")"
+                  patch -p1 < "/upstream-fix/patches/mesa/$(echo "$line" | xargs)"
+                done < /upstream-fix/patches/mesa/series
+              fi
 
               echo "=== Building RADV ==="
               meson setup build -Dvulkan-drivers=amd -Dgallium-drivers= -Dglx=disabled -Dllvm=disabled -Dbuildtype=release -Dprefix=/opt/bc250-gfx1013
