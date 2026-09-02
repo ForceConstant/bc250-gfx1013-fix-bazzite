@@ -172,6 +172,9 @@ jobs:
           echo "Target kernel: $KERNEL_VER"
           echo "Upstream commit: $UPSTREAM_COMMIT"
           
+          # Create output directory for podman volume mount
+          mkdir -p output
+          
           # Create a build container based on Bazzite
           podman run --rm \
             -v "${{ github.workspace }}:/workspace:ro" \
@@ -300,6 +303,9 @@ jobs:
               exit 1
             fi
           fi
+          
+          # Create output directory for podman volume mount
+          mkdir -p output
           
           # Use Fedora 43 for Mesa build (matches Bazzite's base)
           podman run --rm \
