@@ -136,8 +136,24 @@ jobs:
             "$BASE_IMAGE" bash -c '
               set -euo pipefail
               echo "=== Installing build deps ==="
-              dnf install -y kernel-devel-"$KERNEL_VER" gcc make flex bison elfutils-libelf-devel openssl-devel bc perl 2>/dev/null || \
-                rpm-ostree install -y kernel-devel-"$KERNEL_VER" gcc make flex bison elfutils-libelf-devel openssl-devel bc perl
+              # Bazzite uses the ogc kernel (based on Fedora kernel).
+              # kernel-devel for ogc is not in standard repos, but we can use
+              # the matching Fedora kernel-devel since amdgpu is identical.
+              KERNEL_MAJOR=$(echo "$KERNEL_VER" | cut -d. -f1-3)
+              dnf install -y "kernel-devel-${KERNEL_MAJOR}" gcc make flex bison elfutils-libelf-devel openssl-devel bc perl 2>/dev/null || \
+                dnf install -y kernel-devel gcc make flex bison elfutils-libelf-devel openssl-devel bc perl 2>/dev/null || \
+                rpm-ostree install -y kernel-devel gcc make flex bison elfutils-libelf-devel openssl-devel bc perl
+              
+              # Find the installed kernel-devel version
+              INSTALLED_KVER=$(rpm -q kernel-devel --queryformat "%{VERSION}-%{RELEASE}" 2>/dev/null | head -1)
+              echo "Installed kernel-devel: $INSTALLED_KVER"
+              KDEVEL_DIR="/lib/modules/${INSTALLED_KVER}/build"
+              if [[ ! -d "$KDEVEL_DIR" ]]; then
+                # Try matching by major version
+                KDEVEL_DIR=$(ls -d /lib/modules/7*/build 2>/dev/null | head -1)
+                INSTALLED_KVER=$(basename "$(dirname "$KDEVEL_DIR")")
+              fi
+              echo "Using kernel build dir: $KDEVEL_DIR"
 
               echo "=== Upstream patches ==="
               if [[ ! -d /upstream-fix/patches ]]; then
@@ -153,11 +169,24 @@ jobs:
 
               echo "=== Kernel source ==="
               if [[ ! -d /kernel-src-cache/drivers ]]; then
-                git clone --depth=1 --branch bazzite https://github.com/hhd-dev/kernel-bazzite.git /kernel-src-cache 2>/dev/null || \
-                  git clone --depth=1 https://github.com/ublue-os/kernel-bazzite.git /kernel-src-cache
+                # Download kernel source matching the installed kernel-devel
+                KERNEL_SRC_VER=$(echo "$INSTALLED_KVER" | sed 's/-.*///' )
+                echo "Downloading kernel source $KERNEL_SRC_VER..."
+                cd /tmp
+                curl -fsSL -o kernel.tar.xz "https://cdn.kernel.org/pub/linux/kernel/v$(echo "$KERNEL_SRC_VER" | cut -d. -f1).x/linux-${KERNEL_SRC_VER}.tar.xz" 2>/dev/null || \
+                  curl -fsSL -o kernel.tar.xz "https://kojipkgs.fedoraproject.org/packages/kernel/${KERNEL_SRC_VER}/$(echo "$INSTALLED_KVER" | sed 's/.*-//')/src/kernel-${KERNEL_SRC_VER}.src.rpm" 2>/dev/null || true
+                if [[ -f kernel.tar.xz ]]; then
+                  tar xf kernel.tar.xz
+                  mv linux-${KERNEL_SRC_VER} /kernel-src-cache 2>/dev/null || mv linux-* /kernel-src-cache 2>/dev/null || true
+                fi
+                # Fallback: try git clone of mainline
+                if [[ ! -d /kernel-src-cache/drivers ]]; then
+                  git clone --depth=1 --branch v${KERNEL_SRC_VER} https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git /kernel-src-cache 2>/dev/null || \
+                    git clone --depth=1 --branch linux-${KERNEL_SRC_VER} https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git /kernel-src-cache 2>/dev/null || true
+                fi
               fi
               cd /kernel-src-cache
-              echo "Kernel: $(head -1 Makefile)"
+              echo "Kernel source: $(head -1 Makefile 2>/dev/null || echo 'not found')"
 
               echo "=== Applying patches ==="
               for p in /upstream-fix/patches/kernel/v33/*.patch; do
@@ -166,9 +195,16 @@ jobs:
               done
 
               echo "=== Building amdgpu.ko ==="
-              make -C /lib/modules/"$KERNEL_VER"/build M="$PWD/drivers/gpu/drm/amd/amdgpu" -j"$(nproc)" modules
+              AMDGPU_DIR="$PWD/drivers/gpu/drm/amd/amdgpu"
+              if [[ ! -d "$AMDGPU_DIR" ]]; then
+                echo "ERROR: amdgpu source not found at $AMDGPU_DIR"
+                echo "Kernel source tree:"
+                ls -la
+                exit 1
+              fi
+              make -C "$KDEVEL_DIR" M="$AMDGPU_DIR" -j"$(nproc)" modules
               mkdir -p /output
-              cp drivers/gpu/drm/amd/amdgpu/amdgpu.ko /output/
+              cp "$AMDGPU_DIR/amdgpu.ko" /output/
               echo "✅ amdgpu.ko built"
               ls -lh /output/amdgpu.ko
             '
