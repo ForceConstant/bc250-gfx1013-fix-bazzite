@@ -39,7 +39,8 @@ jobs:
         id: base-info
         run: |
           podman pull "$BASE_IMAGE" 2>/dev/null || docker pull "$BASE_IMAGE"
-          KERNEL=$(podman run --rm "$BASE_IMAGE" uname -r 2>/dev/null || docker run --rm "$BASE_IMAGE" uname -r)
+          KERNEL=$(podman run --rm "$BASE_IMAGE" bash -c 'rpm -q --queryformat "%{VERSION}-%{RELEASE}" kernel 2>/dev/null || rpm -q --queryformat "%{VERSION}-%{RELEASE}" kernel-bazzite 2>/dev/null || uname -r' 2>/dev/null || \
+                   docker run --rm "$BASE_IMAGE" bash -c 'rpm -q --queryformat "%{VERSION}-%{RELEASE}" kernel 2>/dev/null || rpm -q --queryformat "%{VERSION}-%{RELEASE}" kernel-bazzite 2>/dev/null || uname -r')
           MESA=$(podman run --rm "$BASE_IMAGE" rpm -q mesa-vulkan-drivers --queryformat '%{VERSION}-%{RELEASE}' 2>/dev/null || \
                  docker run --rm "$BASE_IMAGE" rpm -q mesa-vulkan-drivers --queryformat '%{VERSION}-%{RELEASE}')
           echo "kernel_version=$KERNEL" >> "$GITHUB_OUTPUT"
