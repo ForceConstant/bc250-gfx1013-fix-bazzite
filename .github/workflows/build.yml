@@ -51,7 +51,9 @@ jobs:
           PINNED=$(grep -v '^#' upstream-commit.txt | grep -v '^$' | awk '{print $1}')
           LATEST=$(git ls-remote "$UPSTREAM_REPO" main | awk '{print $1}')
           echo "Pinned: ${PINNED:0:8} | Latest: ${LATEST:0:8}"
-          [[ "$PINNED" != "$LATEST" ]] && echo "⚠️  Upstream has newer commits"
+          if [[ "$PINNED" != "$LATEST" ]]; then
+            echo "⚠️  Upstream has newer commits"
+          fi
 
       - name: Detect changes
         id: detect
