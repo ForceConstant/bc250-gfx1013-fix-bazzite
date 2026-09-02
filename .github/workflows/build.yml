@@ -85,7 +85,8 @@ jobs:
   build-kernel:
     name: Build patched amdgpu.ko
     needs: detect-changes
-    if: needs.detect-changes.outputs.kernel_changed == 'true'
+    # DISABLED during Mesa iteration (Phase 0). Re-enable: remove this line.
+    if: false
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
