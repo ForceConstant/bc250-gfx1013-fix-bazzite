@@ -112,6 +112,8 @@ jobs:
           key: bazzite-base-${{ needs.detect-changes.outputs.base_kernel }}
 
       - name: Build amdgpu.ko
+        
+        shell: bash
         run: |
           set -euo pipefail
           KERNEL_VER="${{ needs.detect-changes.outputs.base_kernel }}"
@@ -248,6 +250,7 @@ jobs:
           key: fedora-43-base
 
       - name: Build RADV
+        shell: bash
         run: |
           set -euo pipefail
           MESA_FULL="${{ needs.detect-changes.outputs.base_mesa }}"
