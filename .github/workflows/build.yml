@@ -48,6 +48,7 @@ jobs:
           echo "Kernel: $KERNEL | Mesa: $MESA"
 
       - name: Check upstream
+        shell: bash
         run: |
           PINNED=$(grep -v '^#' upstream-commit.txt | grep -v '^$' | awk '{print $1}')
           LATEST=$(git ls-remote "$UPSTREAM_REPO" main | awk '{print $1}')
@@ -58,6 +59,7 @@ jobs:
 
       - name: Detect changes
         id: detect
+        shell: bash
         run: |
           mkdir -p .base-digests
           echo "${{ steps.base-info.outputs.kernel_version }}" > .base-digests/current-kernel.txt
