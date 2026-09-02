@@ -292,7 +292,7 @@ jobs:
                 vulkan-headers vulkan-loader-devel libdrm-devel elfutils-libelf-devel \
                 expat-devel zlib-ng-devel llvm-devel glslang \
                 wayland-devel wayland-protocols-devel cmake \
-                libx11-devel libxext-devel libxfixes-devel libxdamage-devel \
+                libX11-devel libXext-devel libXfixes-devel libXdamage-devel \
                 libxshmfence-devel libxcb-devel \
                 xcb-util-devel xcb-util-keysyms-devel xcb-util-wm-devel \
                 git patch tar xz which make
