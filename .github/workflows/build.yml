@@ -311,7 +311,7 @@ jobs:
               echo "=== Applying patches ==="
               if [ -f /workspace/patches/mesa/0001-gfx1013-compute-queue-fix.patch ]; then
                 echo "Using local rebased Mesa patch"
-                patch -p0 < /workspace/patches/mesa/0001-gfx1013-compute-queue-fix.patch
+                patch -p1 < /workspace/patches/mesa/0001-gfx1013-compute-queue-fix.patch
               else
                 while IFS= read -r line; do
                   case "$line" in \#*) continue ;; esac
