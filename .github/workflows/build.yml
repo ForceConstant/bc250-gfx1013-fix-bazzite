@@ -239,6 +239,14 @@ jobs:
 
       - run: sudo apt-get update && sudo apt-get install -y podman
 
+      - name: Compute patch hash
+        id: patch-hash
+        shell: bash
+        run: |
+          PATCH_HASH=$(sha256sum patches/mesa/*.patch | sha256sum | cut -d' ' -f1)
+          echo "hash=$PATCH_HASH" >> "$GITHUB_OUTPUT"
+          echo "Patch hash: $PATCH_HASH"
+
       - uses: actions/cache@v4
         with:
           path: /tmp/upstream-fix-cache
@@ -254,6 +262,13 @@ jobs:
           path: /tmp/fedora-image-cache
           key: fedora-43-base
 
+      # Compiled-tree cache: hit = skip the 30-45 min compile entirely.
+      - uses: actions/cache@v4
+        id: mesa-compile-cache
+        with:
+          path: /tmp/mesa-cache
+          key: mesa-opt-${{ needs.detect-changes.outputs.base_mesa }}-${{ steps.patch-hash.outputs.hash }}
+
       - name: Build RADV
         shell: bash
         run: |
@@ -264,7 +279,17 @@ jobs:
           UPSTREAM_COMMIT="${{ steps.upstream.outputs.commit }}"
           echo "Mesa: $MESA_VER | Upstream: $UPSTREAM_COMMIT"
 
-          mkdir -p output /tmp/upstream-fix-cache /tmp/mesa-tarball /tmp/fedora-image-cache
+          mkdir -p output /tmp/upstream-fix-cache /tmp/mesa-tarball /tmp/fedora-image-cache /tmp/mesa-cache
+
+          # Fast path: compiled tree from cache — skip the whole compile.
+          if [ -d /tmp/mesa-cache/opt/bc250-gfx1013 ]; then
+            echo "=== CACHE HIT: using compiled Mesa tree ==="
+            cp -r /tmp/mesa-cache/opt /output/
+            cp /tmp/mesa-cache/radeon_icd.x86_64.json /output/ 2>/dev/null || true
+            echo "RADV ready from cache"
+            du -sh /output/opt/bc250-gfx1013/
+            exit 0
+          fi
 
           if [ -f /tmp/fedora-image-cache/fedora.tar ]; then
             podman load -i /tmp/fedora-image-cache/fedora.tar 2>/dev/null || true
@@ -340,11 +365,73 @@ jobs:
               du -sh /output/opt/bc250-gfx1013/
             '
 
+          # Populate compiled-tree cache for next run (same key unless version/patch changes)
+          if [ -d output/opt/bc250-gfx1013 ]; then
+            mkdir -p /tmp/mesa-cache
+            cp -r output/opt /tmp/mesa-cache/
+            cp output/radeon_icd.x86_64.json /tmp/mesa-cache/ 2>/dev/null || true
+            echo "Compiled tree saved to cache dir"
+          fi
+
       - uses: actions/upload-artifact@v4
         with:
           name: radv-patched
           path: output/
           retention-days: 7
+
+  build-image:
+    name: Build+push Bazzite image
+    needs: [detect-changes, build-mesa]
+    if: needs.detect-changes.outputs.mesa_changed == 'true' && needs.build-mesa.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    env:
+      IMAGE_NAME: bazzite-bc250-patched-kde
+      IMAGE_TAG: testing
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download RADV artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: radv-patched
+          path: artifacts/
+
+      - name: Verify artifact layout
+        shell: bash
+        run: |
+          ls -la artifacts/
+          ls -la artifacts/opt/bc250-gfx1013/share/vulkan/icd.d/ 2>/dev/null && echo "artifact OK"
+
+      - name: Build image
+        shell: bash
+        run: |
+          set -euo pipefail
+          IMG="ghcr.io/${{ github.repository_owner }}/${IMAGE_NAME}:${IMAGE_TAG}"
+          echo "Building: $IMG"
+          docker build -t "$IMG" -f Containerfile .
+
+      - name: Verify image contents
+        shell: bash
+        run: |
+          set -euo pipefail
+          IMG="ghcr.io/${{ github.repository_owner }}/${IMAGE_NAME}:${IMAGE_TAG}"
+          echo "=== Image verification ==="
+          docker run --rm "$IMG" ls -la /opt/bc250-gfx1013/share/vulkan/icd.d/
+          docker run --rm "$IMG" sh -c 'cat /usr/lib/environment.d/10-bc250-mesa.conf'
+          docker run --rm "$IMG" sh -c 'test -f /opt/bc250-gfx1013/lib/libvulkan_radeon.so && echo "ICD lib present"'
+          echo "=== verification passed ==="
+
+      - name: Push to GHCR
+        shell: bash
+        run: |
+          set -euo pipefail
+          IMG="ghcr.io/${{ github.repository_owner }}/${IMAGE_NAME}:${IMAGE_TAG}"
+          echo "${{ github.token }}" | docker login ghcr.io -u "${{ github.repository_owner }}" --password-stdin
+          docker push "$IMG"
+          echo "Pushed: $IMG"
 
   verify:
     name: Verify builds
