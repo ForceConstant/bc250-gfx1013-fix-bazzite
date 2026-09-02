@@ -197,7 +197,7 @@ jobs:
           podman run --rm \
             -v "${{ github.workspace }}:/workspace:ro" \
             -v "${{ github.workspace }}/output:/output" \
-            -v /tmp/upstream-fix-cache:/upstream-fix:ro \
+            -v /tmp/upstream-fix-cache:/upstream-fix:rw \
             -v /tmp/kernel-src-cache:/kernel-src-cache:rw \
             -e KERNEL_VER="$KERNEL_VER" \
             -e UPSTREAM_COMMIT="$UPSTREAM_COMMIT" \
@@ -360,7 +360,7 @@ jobs:
           podman run --rm \
             -v "${{ github.workspace }}:/workspace:ro" \
             -v "${{ github.workspace }}/output:/output" \
-            -v /tmp/upstream-fix-cache:/upstream-fix:ro \
+            -v /tmp/upstream-fix-cache:/upstream-fix:rw \
             -v /tmp/mesa-tarball/mesa.tar.gz:/mesa.tar.gz:ro \
             -e MESA_VERSION="$MESA_VER" \
             -e UPSTREAM_COMMIT="$UPSTREAM_COMMIT" \
