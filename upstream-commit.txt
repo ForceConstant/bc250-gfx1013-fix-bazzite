@@ -1,0 +1,6 @@
+# Pinned commit from DryhoppedIPA/bc250-gfx1013-fix
+# Update this file to pull newer patches. The CI workflow clones at this commit.
+# To find the latest: git ls-remote https://github.com/DryhoppedIPA/bc250-gfx1013-fix.git main
+#
+# Format: <commit-hash> # <date> <description>
+5bb0dac39d094fe9cbd10d2b34868837125d9c39 # 2026-09-02 latest — v33 kernel patches, Mesa 0001

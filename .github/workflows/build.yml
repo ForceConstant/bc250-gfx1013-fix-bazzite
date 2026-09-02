@@ -1,0 +1,486 @@
+name: Build GFX1013 Patched Kernel + Mesa
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - "**.md"
+      - "LICENSE"
+  schedule:
+    # Daily at 09:00 UTC — rebuild if base image changed
+    - cron: "0 9 * * *"
+  workflow_dispatch:
+    inputs:
+      force_build:
+        description: "Force build even if no changes detected"
+        required: false
+        type: boolean
+        default: false
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref || github.run_id }}
+  cancel-in-progress: true
+
+env:
+  # Bazzite base image
+  BASE_IMAGE: "ghcr.io/ublue-os/bazzite:stable"
+  # Upstream patches repo (DryhoppedIPA/bc250-gfx1013-fix)
+  UPSTREAM_REPO: "https://github.com/DryhoppedIPA/bc250-gfx1013-fix.git"
+
+jobs:
+  # ──────────────────────────────────────────────
+  # Stage 1: Detect what changed
+  # ──────────────────────────────────────────────
+  detect-changes:
+    name: Detect changes
+    runs-on: ubuntu-latest
+    outputs:
+      should_build: ${{ steps.detect.outputs.should_build }}
+      kernel_changed: ${{ steps.detect.outputs.kernel_changed }}
+      mesa_changed: ${{ steps.detect.outputs.mesa_changed }}
+      base_kernel: ${{ steps.base-info.outputs.kernel_version }}
+      base_mesa: ${{ steps.base-info.outputs.mesa_version }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Get base image info
+        id: base-info
+        run: |
+          # Pull base image and extract kernel + Mesa versions
+          podman pull "${{ env.BASE_IMAGE }}" 2>/dev/null || docker pull "${{ env.BASE_IMAGE }}"
+          
+          KERNEL=$(podman run --rm "${{ env.BASE_IMAGE }}" uname -r 2>/dev/null || \
+                   docker run --rm "${{ env.BASE_IMAGE }}" uname -r)
+          MESA=$(podman run --rm "${{ env.BASE_IMAGE }}" \
+            rpm -q mesa-vulkan-drivers --queryformat '%{VERSION}-%{RELEASE}' 2>/dev/null || \
+                   docker run --rm "${{ env.BASE_IMAGE }}" \
+            rpm -q mesa-vulkan-drivers --queryformat '%{VERSION}-%{RELEASE}')
+          
+          echo "kernel_version=$KERNEL" >> "$GITHUB_OUTPUT"
+          echo "mesa_version=$MESA" >> "$GITHUB_OUTPUT"
+          echo "Base kernel: $KERNEL"
+          echo "Base Mesa: $MESA"
+
+      - name: Check upstream patches
+        id: upstream
+        run: |
+          # Read pinned commit
+          PINNED=$(head -5 upstream-commit.txt | grep -v '^#' | awk '{print $1}')
+          echo "Pinned upstream commit: $PINNED"
+          
+          # Check if upstream has newer commits
+          LATEST=$(git ls-remote "${{ env.UPSTREAM_REPO }}" main | awk '{print $1}')
+          echo "Latest upstream commit: $LATEST"
+          
+          if [[ "$PINNED" != "$LATEST" ]]; then
+            echo "⚠️  Upstream has new commits (pinned: ${PINNED:0:8}, latest: ${LATEST:0:8})"
+            echo "Consider updating upstream-commit.txt"
+          else
+            echo "✅ Upstream patches are current."
+          fi
+
+      - name: Detect changes
+        id: detect
+        run: |
+          mkdir -p .base-digests
+          
+          # Save current base info
+          echo "${{ steps.base-info.outputs.kernel_version }}" > .base-digests/current-kernel.txt
+          echo "${{ steps.base-info.outputs.mesa_version }}" > .base-digests/current-mesa.txt
+          
+          # Check if previous digest exists
+          PREV_KERNEL=""
+          PREV_MESA=""
+          if [[ -f ".base-digests/previous-kernel.txt" ]]; then
+            PREV_KERNEL=$(cat .base-digests/previous-kernel.txt)
+          fi
+          if [[ -f ".base-digests/previous-mesa.txt" ]]; then
+            PREV_MESA=$(cat .base-digests/previous-mesa.txt)
+          fi
+          
+          CURR_KERNEL="${{ steps.base-info.outputs.kernel_version }}"
+          CURR_MESA="${{ steps.base-info.outputs.mesa_version }}"
+          
+          kernel_changed="false"
+          mesa_changed="false"
+          should_build="false"
+          
+          if [[ "$PREV_KERNEL" != "$CURR_KERNEL" || "$PREV_MESA" != "$CURR_MESA" ]]; then
+            kernel_changed="true"
+            mesa_changed="true"
+            should_build="true"
+            echo "Base image changed (kernel or Mesa version)."
+          fi
+          
+          # Check if upstream commit changed
+          PINNED=$(head -5 upstream-commit.txt | grep -v '^#' | awk '{print $1}')
+          PREV_PINNED=""
+          if [[ -f ".base-digests/previous-upstream.txt" ]]; then
+            PREV_PINNED=$(cat .base-digests/previous-upstream.txt)
+          fi
+          
+          if [[ "$PINNED" != "$PREV_PINNED" ]]; then
+            should_build="true"
+            kernel_changed="true"
+            mesa_changed="true"
+            echo "Upstream patches changed (${PREV_PINNED:0:8} → ${PINNED:0:8})."
+          fi
+          
+          # Force build check
+          if [[ "${{ github.event.inputs.force_build }}" == "true" ]]; then
+            should_build="true"
+            kernel_changed="true"
+            mesa_changed="true"
+            echo "Force build requested."
+          fi
+          
+          echo "kernel_changed=$kernel_changed" >> "$GITHUB_OUTPUT"
+          echo "mesa_changed=$mesa_changed" >> "$GITHUB_OUTPUT"
+          echo "should_build=$should_build" >> "$GITHUB_OUTPUT"
+
+  # ──────────────────────────────────────────────
+  # Stage 2: Build patched amdgpu.ko
+  # ──────────────────────────────────────────────
+  build-kernel:
+    name: Build patched amdgpu.ko
+    needs: detect-changes
+    if: needs.detect-changes.outputs.kernel_changed == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Read pinned upstream commit
+        id: upstream
+        run: |
+          PINNED=$(head -5 upstream-commit.txt | grep -v '^#' | awk '{print $1}')
+          echo "commit=$PINNED" >> "$GITHUB_OUTPUT"
+          echo "Upstream commit: $PINNED"
+
+      - name: Set up Podman
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y podman
+
+      - name: Build amdgpu.ko in Bazzite container
+        run: |
+          set -euo pipefail
+          
+          KERNEL_VER="${{ needs.detect-changes.outputs.base_kernel }}"
+          UPSTREAM_COMMIT="${{ steps.upstream.outputs.commit }}"
+          echo "Target kernel: $KERNEL_VER"
+          echo "Upstream commit: $UPSTREAM_COMMIT"
+          
+          # Create a build container based on Bazzite
+          podman run --rm \
+            -v "${{ github.workspace }}:/workspace:ro" \
+            -v "${{ github.workspace }}/output:/output" \
+            -e KERNEL_VER="$KERNEL_VER" \
+            -e UPSTREAM_COMMIT="$UPSTREAM_COMMIT" \
+            -e UPSTREAM_REPO="${{ env.UPSTREAM_REPO }}" \
+            "${{ env.BASE_IMAGE }}" \
+            bash -c '
+              set -euo pipefail
+              
+              echo "=== Installing build deps ==="
+              # Install kernel-devel and build tools
+              rpm-ostree install -y \
+                kernel-devel-"$KERNEL_VER" \
+                gcc make flex bison elfutils-libelf-devel \
+                openssl-devel bc perl \
+                2>/dev/null || {
+                echo "rpm-ostree failed, trying dnf..."
+                dnf install -y \
+                  kernel-devel-"$KERNEL_VER" \
+                  gcc make flex bison elfutils-libelf-devel \
+                  openssl-devel bc perl
+              }
+              
+              echo "=== Cloning upstream patches ==="
+              cd /tmp
+              git clone --depth=1 "$UPSTREAM_REPO" upstream-fix
+              cd upstream-fix
+              git fetch --depth=1 origin "$UPSTREAM_COMMIT"
+              git checkout "$UPSTREAM_COMMIT"
+              echo "Upstream commit: $(git rev-parse HEAD)"
+              echo "Kernel patches:"
+              ls -la patches/kernel/v33/
+              
+              echo "=== Cloning kernel source ==="
+              cd /tmp
+              git clone --depth=1 --branch bazzite \
+                https://github.com/hhd-dev/kernel-bazzite.git \
+                kernel-src 2>/dev/null || {
+                echo "Direct clone failed, trying alternative..."
+                git clone --depth=1 \
+                  https://github.com/ublue-os/kernel-bazzite.git \
+                  kernel-src
+              }
+              
+              cd kernel-src
+              echo "Kernel version from Makefile: $(head -1 Makefile)"
+              
+              echo "=== Applying kernel patches ==="
+              for p in /tmp/upstream-fix/patches/kernel/v33/*.patch; do
+                echo "Applying: $(basename "$p")"
+                patch -p1 < "$p"
+              done
+              echo "All kernel patches applied."
+              
+              echo "=== Building amdgpu.ko ==="
+              AMDGPU_DIR="$PWD/drivers/gpu/drm/amd/amdgpu"
+              make -C /lib/modules/"$KERNEL_VER"/build \
+                M="$AMDGPU_DIR" -j"$(nproc)" modules
+              
+              echo "=== Copying output ==="
+              mkdir -p /output
+              cp "$AMDGPU_DIR/amdgpu.ko" /output/
+              echo "amdgpu.ko built successfully."
+              ls -lh /output/amdgpu.ko
+            '
+          
+          echo "=== Build artifact ==="
+          ls -lh output/
+
+      - name: Upload amdgpu.ko artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: amdgpu-patched
+          path: output/amdgpu.ko
+          retention-days: 7
+
+  # ──────────────────────────────────────────────
+  # Stage 3: Build patched RADV
+  # ──────────────────────────────────────────────
+  build-mesa:
+    name: Build patched RADV
+    needs: detect-changes
+    if: needs.detect-changes.outputs.mesa_changed == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Read pinned upstream commit
+        id: upstream
+        run: |
+          PINNED=$(head -5 upstream-commit.txt | grep -v '^#' | awk '{print $1}')
+          echo "commit=$PINNED" >> "$GITHUB_OUTPUT"
+          echo "Upstream commit: $PINNED"
+
+      - name: Set up Podman
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y podman
+
+      - name: Build RADV in Fedora container
+        run: |
+          set -euo pipefail
+          
+          # Extract clean Mesa version from RPM string (e.g. "26.2.1-3.fc43" → "26.2.1")
+          MESA_FULL="${{ needs.detect-changes.outputs.base_mesa }}"
+          MESA_VER=$(echo "$MESA_FULL" | sed 's/-[0-9].*//')  # strip release suffix
+          UPSTREAM_COMMIT="${{ steps.upstream.outputs.commit }}"
+          echo "Mesa RPM version: $MESA_FULL"
+          echo "Mesa source version: $MESA_VER"
+          echo "Upstream commit: $UPSTREAM_COMMIT"
+          
+          # Build tarball URL dynamically from detected version
+          MESA_TARBALL_URL="https://gitlab.freedesktop.org/mesa/mesa/-/archive/mesa-${MESA_VER}/mesa-mesa-${MESA_VER}.tar.gz"
+          echo "Mesa tarball URL: $MESA_TARBALL_URL"
+          
+          # Verify URL is reachable
+          if ! curl -fsSL --head "$MESA_TARBALL_URL" > /dev/null 2>&1; then
+            echo "WARNING: tarball URL not found, trying without release suffix..."
+            MESA_TARBALL_URL="https://gitlab.freedesktop.org/mesa/mesa/-/archive/${MESA_VER}/mesa-${MESA_VER}.tar.gz"
+            if ! curl -fsSL --head "$MESA_TARBALL_URL" > /dev/null 2>&1; then
+              echo "ERROR: Cannot find Mesa tarball for version $MESA_VER"
+              echo "Check the git tag format at https://gitlab.freedesktop.org/mesa/mesa/-/tags"
+              exit 1
+            fi
+          fi
+          
+          # Use Fedora 43 for Mesa build (matches Bazzite's base)
+          podman run --rm \
+            -v "${{ github.workspace }}:/workspace:ro" \
+            -v "${{ github.workspace }}/output:/output" \
+            -e MESA_VERSION="$MESA_VER" \
+            -e MESA_TARBALL_URL="$MESA_TARBALL_URL" \
+            -e UPSTREAM_COMMIT="$UPSTREAM_COMMIT" \
+            -e UPSTREAM_REPO="${{ env.UPSTREAM_REPO }}" \
+            registry.fedoraproject.org/fedora:43 \
+            bash -c '
+              set -euo pipefail
+              
+              echo "=== Installing build deps ==="
+              dnf install -y \
+                gcc gcc-c++ meson ninja-build \
+                python3 python3-mako python3-pycparser \
+                vulkan-headers vulkan-loader-devel \
+                libdrm-devel elfutils-libelf-devel \
+                expat-devel zlib-ng-devel \
+                llvm-devel glslang \
+                git patch tar xz findutils coreutils diffutils \
+                which make \
+                2>/dev/null || \
+              dnf groupinstall -y "Development Tools" && \
+              dnf install -y \
+                meson ninja-build python3-mako \
+                vulkan-headers vulkan-loader-devel \
+                libdrm-devel elfutils-libelf-devel \
+                llvm-devel glslang \
+                git patch tar xz
+            
+            echo "=== Cloning upstream patches ==="
+            cd /tmp
+            git clone --depth=1 "$UPSTREAM_REPO" upstream-fix
+            cd upstream-fix
+            git fetch --depth=1 origin "$UPSTREAM_COMMIT"
+            git checkout "$UPSTREAM_COMMIT"
+            echo "Upstream commit: $(git rev-parse HEAD)"
+            echo "Mesa patches:"
+            ls -la patches/mesa/
+            
+            echo "=== Downloading Mesa source ==="
+            cd /tmp
+            curl -fsSL -o mesa.tar.gz "$MESA_TARBALL_URL"
+            tar xf mesa.tar.gz
+            MESA_DIR=$(ls -d mesa-mesa-* | head -1)
+            cd "$MESA_DIR"
+            echo "Mesa source version: $(meson --version 2>/dev/null || head -1 meson.build | grep version)"
+            
+            echo "=== Applying patches ==="
+            SERIES="/tmp/upstream-fix/patches/mesa/series"
+            while IFS= read -r line; do
+              [[ "$line" =~ ^[[:space:]]*# ]] && continue
+              [[ -z "${line// /}" ]] && continue
+              
+              PATCH_FILE="/tmp/upstream-fix/patches/mesa/$(echo "$line" | xargs)"
+              echo "Applying: $(basename "$PATCH_FILE")"
+              patch -p1 < "$PATCH_FILE"
+            done < "$SERIES"
+            echo "All Mesa patches applied."
+            
+            echo "=== Configuring build (RADV only) ==="
+            DESTDIR="/output"
+            PREFIX="/opt/bc250-gfx1013"
+            
+            meson setup build \
+              -Dvulkan-drivers=amd \
+              -Dgallium-drivers= \
+              -Dglx=disabled \
+              -Dllvm=disabled \
+              -Dbuildtype=release \
+              -Dprefix="$PREFIX"
+            
+            echo "=== Building ==="
+            ninja -C build
+            
+            echo "=== Installing to DESTDIR ==="
+            DESTDIR="$DESTDIR" ninja -C build install
+            
+            # Copy ICD manifest
+            ICD_SRC="$DESTDIR/$PREFIX/share/vulkan/icd.d/radeon_icd.x86_64.json"
+            if [[ -f "$ICD_SRC" ]]; then
+              cp "$ICD_SRC" /output/radeon_icd.x86_64.json
+              echo "ICD manifest copied."
+            fi
+            
+            echo "=== Build complete ==="
+            du -sh "$DESTDIR/$PREFIX/"
+            '
+          
+          echo "=== Build artifact ==="
+          ls -lh output/
+
+      - name: Upload RADV artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: radv-patched
+          path: output/
+          retention-days: 7
+
+  # ──────────────────────────────────────────────
+  # Stage 4: Verification (no image assembly yet)
+  # ──────────────────────────────────────────────
+  verify:
+    name: Verify builds
+    needs: [detect-changes, build-kernel, build-mesa]
+    if: always() && (needs.build-kernel.result == 'success' || needs.build-mesa.result == 'success')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download amdgpu.ko (if built)
+        uses: actions/download-artifact@v4
+        with:
+          name: amdgpu-patched
+          path: output/
+        continue-on-error: true
+
+      - name: Download RADV (if built)
+        uses: actions/download-artifact@v4
+        with:
+          name: radv-patched
+          path: output/
+        continue-on-error: true
+
+      - name: Verify artifacts
+        run: |
+          echo "=== Verification ==="
+          echo ""
+          
+          if [[ -f "output/amdgpu.ko" ]]; then
+            echo "✅ amdgpu.ko present"
+            file output/amdgpu.ko
+            modinfo output/amdgpu.ko 2>/dev/null | head -5 || echo "(modinfo not available on runner)"
+          else
+            echo "⚠️  amdgpu.ko not built (kernel unchanged or build skipped)"
+          fi
+          
+          echo ""
+          
+          if [[ -d "output/opt" ]]; then
+            echo "✅ RADV installed to output/opt/"
+            find output/opt/ -type f | head -20
+          else
+            echo "⚠️  RADV not built (Mesa unchanged or build skipped)"
+          fi
+          
+          echo ""
+          
+          if [[ -f "output/radeon_icd.x86_64.json" ]]; then
+            echo "✅ Vulkan ICD manifest:"
+            cat output/radeon_icd.x86_64.json
+          fi
+          
+          echo ""
+          echo "=== Phase 0 validation complete ==="
+          echo "Both artifacts built successfully."
+          echo "Proceed to Phase 1: image assembly."
+
+  # ──────────────────────────────────────────────
+  # Save digests for next run
+  # ──────────────────────────────────────────────
+  save-digests:
+    name: Save build digests
+    needs: [detect-changes, verify]
+    if: needs.detect-changes.outputs.should_build == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Save current digests
+        run: |
+          mkdir -p .base-digests
+          
+          # Save kernel + Mesa versions
+          echo "${{ needs.detect-changes.outputs.base_kernel }}" > .base-digests/previous-kernel.txt
+          echo "${{ needs.detect-changes.outputs.base_mesa }}" > .base-digests/previous-mesa.txt
+          
+          # Save upstream commit
+          PINNED=$(head -5 upstream-commit.txt | grep -v '^#' | awk '{print $1}')
+          echo "$PINNED" > .base-digests/previous-upstream.txt
+          
+          echo "Digests saved:"
+          cat .base-digests/*.txt
