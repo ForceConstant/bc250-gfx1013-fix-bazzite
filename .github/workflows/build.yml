@@ -182,7 +182,7 @@ jobs:
           echo "Target kernel: $KERNEL_VER"
           echo "Upstream commit: $UPSTREAM_COMMIT"
           
-          mkdir -p output
+          mkdir -p output /tmp/upstream-fix-cache /tmp/bazzite-image-cache /tmp/kernel-src-cache
           
           # Load cached Bazzite image if available
           if [[ -f /tmp/bazzite-image-cache/bazzite.tar ]]; then
@@ -191,7 +191,6 @@ jobs:
           fi
           
           # Save image cache for next run
-          mkdir -p /tmp/bazzite-image-cache
           podman pull "${{ env.BASE_IMAGE }}" 2>/dev/null || true
           podman save "${{ env.BASE_IMAGE }}" -o /tmp/bazzite-image-cache/bazzite.tar 2>/dev/null || true
           
@@ -338,7 +337,7 @@ jobs:
           echo "Mesa version: $MESA_VER"
           echo "Upstream commit: $UPSTREAM_COMMIT"
           
-          mkdir -p output
+          mkdir -p output /tmp/upstream-fix-cache /tmp/mesa-tarball /tmp/fedora-image-cache
           
           # Cache Fedora image
           if [[ -f /tmp/fedora-image-cache/fedora.tar ]]; then
