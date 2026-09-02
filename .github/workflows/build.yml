@@ -123,7 +123,7 @@ jobs:
           mkdir -p output /tmp/upstream-fix-cache /tmp/bazzite-image-cache /tmp/kernel-src-cache
 
           # Load/save Bazzite image cache
-          [[ -f /tmp/bazzite-image-cache/bazzite.tar ]] && podman load -i /tmp/bazzite-image-cache/bazzite.tar 2>/dev/null || true
+          test -f /tmp/bazzite-image-cache/bazzite.tar ]] && podman load -i /tmp/bazzite-image-cache/bazzite.tar 2>/dev/null || true
           podman pull "$BASE_IMAGE" 2>/dev/null || true
           podman save "$BASE_IMAGE" -o /tmp/bazzite-image-cache/bazzite.tar 2>/dev/null || true
 
@@ -150,7 +150,7 @@ jobs:
               INSTALLED_KVER=$(rpm -q kernel-devel --queryformat "%{VERSION}-%{RELEASE}" 2>/dev/null | head -1)
               echo "Installed kernel-devel: $INSTALLED_KVER"
               KDEVEL_DIR="/lib/modules/${INSTALLED_KVER}/build"
-              if [[ ! -d "$KDEVEL_DIR" ]]; then
+              if test ! -d "$KDEVEL_DIR" ]]; then
                 # Try matching by major version
                 KDEVEL_DIR=$(ls -d /lib/modules/7*/build 2>/dev/null | head -1)
                 INSTALLED_KVER=$(basename "$(dirname "$KDEVEL_DIR")")
@@ -158,7 +158,7 @@ jobs:
               echo "Using kernel build dir: $KDEVEL_DIR"
 
               echo "=== Upstream patches ==="
-              if [[ ! -d /upstream-fix/patches ]]; then
+              if test ! -d /upstream-fix/patches ]]; then
                 git clone "$UPSTREAM_REPO" /upstream-fix
                 cd /upstream-fix
                 git fetch --depth=1 origin "$UPSTREAM_COMMIT"
@@ -170,19 +170,19 @@ jobs:
               echo "Upstream: $(git rev-parse HEAD)"
 
               echo "=== Kernel source ==="
-              if [[ ! -d /kernel-src-cache/drivers ]]; then
+              if test ! -d /kernel-src-cache/drivers ]]; then
                 # Download kernel source matching the installed kernel-devel
                 KERNEL_SRC_VER=$(echo "$INSTALLED_KVER" | sed 's/-.*///' )
                 echo "Downloading kernel source $KERNEL_SRC_VER..."
                 cd /tmp
                 curl -fsSL -o kernel.tar.xz "https://cdn.kernel.org/pub/linux/kernel/v$(echo "$KERNEL_SRC_VER" | cut -d. -f1).x/linux-${KERNEL_SRC_VER}.tar.xz" 2>/dev/null || \
                   curl -fsSL -o kernel.tar.xz "https://kojipkgs.fedoraproject.org/packages/kernel/${KERNEL_SRC_VER}/$(echo "$INSTALLED_KVER" | sed 's/.*-//')/src/kernel-${KERNEL_SRC_VER}.src.rpm" 2>/dev/null || true
-                if [[ -f kernel.tar.xz ]]; then
+                if test -f kernel.tar.xz ]]; then
                   tar xf kernel.tar.xz
                   mv linux-${KERNEL_SRC_VER} /kernel-src-cache 2>/dev/null || mv linux-* /kernel-src-cache 2>/dev/null || true
                 fi
                 # Fallback: try git clone of mainline
-                if [[ ! -d /kernel-src-cache/drivers ]]; then
+                if test ! -d /kernel-src-cache/drivers ]]; then
                   git clone --depth=1 --branch v${KERNEL_SRC_VER} https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git /kernel-src-cache 2>/dev/null || \
                     git clone --depth=1 --branch linux-${KERNEL_SRC_VER} https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git /kernel-src-cache 2>/dev/null || true
                 fi
@@ -198,7 +198,7 @@ jobs:
 
               echo "=== Building amdgpu.ko ==="
               AMDGPU_DIR="$PWD/drivers/gpu/drm/amd/amdgpu"
-              if [[ ! -d "$AMDGPU_DIR" ]]; then
+              if test ! -d "$AMDGPU_DIR" ]]; then
                 echo "ERROR: amdgpu source not found at $AMDGPU_DIR"
                 echo "Kernel source tree:"
                 ls -la
@@ -262,12 +262,12 @@ jobs:
           mkdir -p output /tmp/upstream-fix-cache /tmp/mesa-tarball /tmp/fedora-image-cache
 
           # Cache Fedora image
-          [[ -f /tmp/fedora-image-cache/fedora.tar ]] && podman load -i /tmp/fedora-image-cache/fedora.tar 2>/dev/null || true
+          test -f /tmp/fedora-image-cache/fedora.tar ]] && podman load -i /tmp/fedora-image-cache/fedora.tar 2>/dev/null || true
           podman pull registry.fedoraproject.org/fedora:43 2>/dev/null || true
           podman save registry.fedoraproject.org/fedora:43 -o /tmp/fedora-image-cache/fedora.tar 2>/dev/null || true
 
           # Cache Mesa tarball
-          [[ -f /tmp/mesa-tarball/mesa.tar.gz ]] || curl -fsSL -o /tmp/mesa-tarball/mesa.tar.gz "$MESA_URL"
+          test -f /tmp/mesa-tarball/mesa.tar.gz ]] || curl -fsSL -o /tmp/mesa-tarball/mesa.tar.gz "$MESA_URL"
 
           podman run --rm \
             -v "${{ github.workspace }}:/workspace:ro" \
@@ -286,7 +286,7 @@ jobs:
                 git patch tar xz which make
 
               echo "=== Upstream patches ==="
-              if [[ ! -d /upstream-fix/patches ]]; then
+              if test ! -d /upstream-fix/patches ]]; then
                 git clone "$UPSTREAM_REPO" /upstream-fix
                 cd /upstream-fix
                 git fetch --depth=1 origin "$UPSTREAM_COMMIT"
@@ -304,7 +304,7 @@ jobs:
               echo "=== Applying patches ==="
               # Use our local rebased Mesa patch (upstream 3-hunk patch
               # doesn't apply to Mesa 26.2.1+ — hunk 2 is already upstream)
-              if [[ -f /workspace/patches/mesa/0001-gfx1013-compute-queue-fix.patch ]]; then
+              if test -f /workspace/patches/mesa/0001-gfx1013-compute-queue-fix.patch ]]; then
                 echo "Using local rebased Mesa patch"
                 patch -p0 < /workspace/patches/mesa/0001-gfx1013-compute-queue-fix.patch
               else
@@ -321,7 +321,7 @@ jobs:
               meson setup build -Dvulkan-drivers=amd -Dgallium-drivers= -Dglx=disabled -Dllvm=disabled -Dbuildtype=release -Dprefix=/opt/bc250-gfx1013
               ninja -C build
               DESTDIR=/output ninja -C build install
-              [[ -f /output/opt/bc250-gfx1013/share/vulkan/icd.d/radeon_icd.x86_64.json ]] && \
+              test -f /output/opt/bc250-gfx1013/share/vulkan/icd.d/radeon_icd.x86_64.json ]] && \
                 cp /output/opt/bc250-gfx1013/share/vulkan/icd.d/radeon_icd.x86_64.json /output/
               echo "✅ RADV built"
               du -sh /output/opt/bc250-gfx1013/
@@ -347,9 +347,9 @@ jobs:
         continue-on-error: true
       - run: |
           echo "=== Verification ==="
-          [[ -f output/amdgpu.ko ]] && echo "✅ amdgpu.ko" || echo "⚠️  amdgpu.ko not built"
-          [[ -d output/opt ]] && echo "✅ RADV tree" || echo "⚠️  RADV not built"
-          [[ -f output/radeon_icd.x86_64.json ]] && echo "✅ ICD manifest"
+          test -f output/amdgpu.ko ]] && echo "✅ amdgpu.ko" || echo "⚠️  amdgpu.ko not built"
+          test -d output/opt ]] && echo "✅ RADV tree" || echo "⚠️  RADV not built"
+          test -f output/radeon_icd.x86_64.json ]] && echo "✅ ICD manifest"
           echo "=== Phase 0 complete ==="
 
   save-digests:
