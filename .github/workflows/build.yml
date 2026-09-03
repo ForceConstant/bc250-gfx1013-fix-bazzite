@@ -247,6 +247,9 @@ jobs:
           echo "hash=$PATCH_HASH" >> "$GITHUB_OUTPUT"
           echo "Patch hash: $PATCH_HASH"
 
+      # Ensure cache dirs exist before actions/cache tries to restore into them.
+      - run: mkdir -p /tmp/mesa-cache /tmp/upstream-fix-cache /tmp/mesa-tarball /tmp/fedora-image-cache
+
       - uses: actions/cache@v4
         with:
           path: /tmp/upstream-fix-cache
