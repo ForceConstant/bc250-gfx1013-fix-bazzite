@@ -4,8 +4,8 @@ on:
   push:
     branches: [main]
     paths-ignore: ["**.md", "LICENSE"]
-  schedule:
-    - cron: "0 9 * * *"
+  # schedule:
+  #   - cron: "0 9 * * *"  # DISABLED until Phase 0/1 builds are green
   workflow_dispatch:
     inputs:
       force_build:
